@@ -1,29 +1,38 @@
 package mr
 
-import "log"
-import "net"
-import "os"
-import "net/rpc"
-import "net/http"
+import (
+	"fmt"
+	"log"
+	"net"
+	"net/http"
+	"net/rpc"
+	"os"
+	"sync"
+	"time"
+)
 
+const (
+	Phase_Map = iota + 1
+	Phase_Reduce
+	Phase_Finished
+)
 
 type Coordinator struct {
-	// Your definitions here.
+	phase      chan int
+	ret        bool
+	closing    bool
+	inputFiles []string
 
+	nMapper     int
+	mapCount    int
+	nReduce     int
+	reduceCount int
+
+	task        chan TaskReply
+	reduceTak   map[int][]TaskReply
+	pendingTask map[string]struct{}
+	mut         sync.Mutex
 }
-
-// Your code here -- RPC handlers for the worker to call.
-
-//
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-//
-func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
-	return nil
-}
-
 
 //
 // start a thread that listens for RPCs from worker.go
@@ -46,12 +55,127 @@ func (c *Coordinator) server() {
 // if the entire job has finished.
 //
 func (c *Coordinator) Done() bool {
-	ret := false
+	return c.ret
+}
 
-	// Your code here.
+func (c *Coordinator) dispatchMapTask() {
+	for i := 0; i < len(c.inputFiles); i++ {
+		c.task <- TaskReply{
+			TaskType:  Task_Map,
+			FileNames: []string{c.inputFiles[i]},
+			ID:        fmt.Sprintf("%d", i+1),
+			NReduce:   c.nReduce,
+		}
+	}
+}
 
+func (c *Coordinator) AddReduceTask(args *Task, reply *Empty) error {
+	c.mut.Lock()
+	defer c.mut.Unlock()
 
-	return ret
+	c.reduceTak[args.Bucket] = append(c.reduceTak[args.Bucket], TaskReply{
+		FileNames: args.FileNames,
+	})
+
+	return nil
+}
+
+func (c *Coordinator) dispatchReduceTask() {
+	for i := 0; i < c.nReduce; i++ {
+		fileNames := make([]string, 0, c.nReduce)
+
+		for _, task := range c.reduceTak[i] {
+			fileNames = append(fileNames, task.FileNames...)
+		}
+
+		c.task <- TaskReply{
+			TaskType:  Task_Reduce,
+			FileNames: fileNames,
+			ID:        fmt.Sprintf("%d", i+1),
+			NReduce:   c.nReduce,
+		}
+	}
+}
+
+func (c *Coordinator) HeartBeat(args *Empty, reply *HealthReply) error {
+	if c.closing {
+		reply.Health = false
+	} else {
+		reply.Health = true
+	}
+
+	return nil
+}
+
+func (c *Coordinator) FetchTask(args *Empty, reply *TaskReply) error {
+	task := <-c.task
+	reply.TaskType = task.TaskType
+	reply.FileNames = task.FileNames
+	reply.ID = task.ID
+	reply.NReduce = task.NReduce
+	c.checkTimeout(&task)
+	return nil
+}
+
+func (c *Coordinator) checkTimeout(task *TaskReply) {
+	c.mut.Lock()
+	defer c.mut.Unlock()
+
+	c.pendingTask[fmt.Sprintf("%d-%s", task.TaskType, task.ID)] = struct{}{}
+	time.AfterFunc(10*time.Second, func() {
+		if _, ok := c.pendingTask[fmt.Sprintf("%d-%s", task.TaskType, task.ID)]; ok {
+			c.task <- *task
+		}
+	})
+}
+
+func (c *Coordinator) ACK(task *ACKTask, reply *Empty) error {
+	if _, ok := c.pendingTask[fmt.Sprintf("%d-%s", task.TaskType, task.ID)]; !ok {
+		return fmt.Errorf("wrong task id and type")
+	}
+
+	c.mut.Lock()
+	defer c.mut.Unlock()
+	delete(c.pendingTask, fmt.Sprintf("%d-%s", task.TaskType, task.ID))
+
+	if task.TaskType == Phase_Map {
+		c.mapCount++
+	} else if task.TaskType == Phase_Reduce {
+		c.reduceCount++
+	}
+
+	if c.mapCount == c.nMapper && c.reduceCount == c.nReduce {
+		c.phase <- Phase_Finished
+	}
+
+	if c.mapCount == c.nMapper && c.reduceCount == 0 {
+		c.phase <- Phase_Reduce
+	}
+
+	return nil
+}
+
+func (c *Coordinator) end() {
+	c.closing = true
+	time.Sleep(3 * time.Second) // wait for worker to shutdown
+	c.ret = true
+}
+
+func (c *Coordinator) start() {
+	c.phase <- Phase_Map
+
+	for {
+		phase := <-c.phase
+
+		switch phase {
+		case Phase_Map:
+			c.dispatchMapTask()
+		case Phase_Reduce:
+			c.dispatchReduceTask()
+		case Phase_Finished:
+			c.end()
+		}
+	}
 }
 
 //
@@ -60,11 +184,23 @@ func (c *Coordinator) Done() bool {
 // nReduce is the number of reduce tasks to use.
 //
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	c := Coordinator{}
-
-	// Your code here.
-
+	c := &Coordinator{
+		phase:       make(chan int, 1),
+		ret:         false,
+		closing:     false,
+		task:        make(chan TaskReply),
+		nMapper:     len(files),
+		inputFiles:  files,
+		mapCount:    0,
+		nReduce:     nReduce,
+		reduceCount: 0,
+		reduceTak:   make(map[int][]TaskReply),
+		pendingTask: make(map[string]struct{}),
+		mut:         sync.Mutex{},
+	}
 
 	c.server()
-	return &c
+	go c.start()
+
+	return c
 }

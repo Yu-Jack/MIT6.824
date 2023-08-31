@@ -1,10 +1,24 @@
 package mr
 
-import "fmt"
-import "log"
-import "net/rpc"
-import "hash/fnv"
+import (
+	"encoding/json"
+	"fmt"
+	"hash/fnv"
+	"io"
+	"log"
+	"net/rpc"
+	"os"
+	"sort"
+	"time"
+)
 
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 //
 // Map functions return a slice of KeyValue.
@@ -24,47 +38,166 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-
 //
 // main/mrworker.go calls this function.
 //
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
-	// Your worker implementation here.
+	taskCh := fetchTask()
+	heartBeatCh := coordinatorHeartBeat()
 
-	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
+	for {
+		select {
+		case task, ok := <-taskCh:
+			if !ok {
+				return
+			}
 
+			switch task.TaskType {
+			case Phase_Map:
+				doMapTask(task, mapf)
+			case Phase_Reduce:
+				doReduceTask(task, reducef)
+			case Phase_Finished:
+				return
+			}
+
+			call("Coordinator.ACK", &ACKTask{ID: task.ID, TaskType: task.TaskType}, &Empty{})
+		case _, ok := <-heartBeatCh:
+			if !ok {
+				return
+			}
+		}
+	}
 }
 
-//
-// example function to show how to make an RPC call to the coordinator.
-//
-// the RPC argument and reply types are defined in rpc.go.
-//
-func CallExample() {
-
-	// declare an argument structure.
-	args := ExampleArgs{}
-
-	// fill in the argument(s).
-	args.X = 99
-
-	// declare a reply structure.
-	reply := ExampleReply{}
-
-	// send the RPC request, wait for the reply.
-	// the "Coordinator.Example" tells the
-	// receiving server that we'd like to call
-	// the Example() method of struct Coordinator.
-	ok := call("Coordinator.Example", &args, &reply)
-	if ok {
-		// reply.Y should be 100.
-		fmt.Printf("reply.Y %v\n", reply.Y)
-	} else {
-		fmt.Printf("call failed!\n")
+func doReduceTask(task TaskReply, reducef func(string, []string) string) {
+	var intermediate []KeyValue
+	for _, filename := range task.FileNames {
+		content := getFileContent(filename)
+		var tempIntermediate []KeyValue
+		json.Unmarshal([]byte(content), &tempIntermediate)
+		intermediate = append(intermediate, tempIntermediate...)
 	}
+
+	sort.Sort(ByKey(intermediate))
+	ofile, _ := os.Create(fmt.Sprintf("mr-out-%s", task.ID))
+
+	i := 0
+	for i < len(intermediate) {
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+		output := reducef(intermediate[i].Key, values)
+
+		// this is the correct format for each line of Reduce output.
+		fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+
+		i = j
+	}
+}
+
+func doMapTask(task TaskReply, mapf func(string, string) []KeyValue) {
+	intermediate := []KeyValue{}
+
+	for _, filename := range task.FileNames {
+		content := getFileContent(filename)
+		kva := mapf(filename, content)
+		intermediate = append(intermediate, kva...)
+	}
+
+	buckets := make(map[int][]KeyValue)
+	for i := 0; i < len(intermediate); i++ {
+		kv := intermediate[i]
+		buckets[ihash(kv.Key)%task.NReduce] = append(buckets[ihash(kv.Key)%task.NReduce], kv)
+	}
+
+	for i := 0; i < task.NReduce; i++ {
+		filename := fmt.Sprintf("mr-%s-%d", task.ID, i)
+		ofile, _ := os.Create(filename)
+		content, err := json.Marshal(buckets[i])
+
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		if string(content) == "null" {
+			content = []byte("{}")
+		}
+
+		ofile.Write(content)
+		ofile.Close()
+
+		call("Coordinator.AddReduceTask", &Task{
+			ID: task.ID, TaskType: Task_Reduce,
+			FileNames: []string{filename},
+			Bucket:    i,
+		}, &Empty{})
+	}
+}
+
+func getFileContent(filename string) string {
+	file, err := os.Open(filename)
+	if err != nil {
+		log.Fatalf("cannot open %v", filename)
+	}
+	content, err := io.ReadAll(file)
+	if err != nil {
+		log.Fatalf("cannot read %v", filename)
+	}
+	file.Close()
+
+	return string(content)
+}
+
+func fetchTask() <-chan TaskReply {
+	task := make(chan TaskReply)
+
+	go func() {
+		defer close(task)
+
+		for {
+			t := TaskReply{}
+			if ok := call("Coordinator.FetchTask", &Empty{}, &t); !ok {
+				return
+			} else {
+				task <- t
+			}
+		}
+	}()
+
+	return task
+}
+
+func coordinatorHeartBeat() <-chan struct{} {
+	heartbeat := make(chan struct{})
+
+	go func() {
+		defer close(heartbeat)
+
+		for {
+			time.Sleep(time.Second)
+			hr := HealthReply{}
+
+			if ok := call("Coordinator.HeartBeat", &Empty{}, &hr); !ok {
+				return
+			} else {
+				if hr.Health {
+					heartbeat <- struct{}{}
+				} else {
+					return
+				}
+			}
+		}
+	}()
+
+	return heartbeat
 }
 
 //
