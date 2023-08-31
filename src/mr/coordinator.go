@@ -19,7 +19,7 @@ const (
 
 type Coordinator struct {
 	phase      chan int
-	ret        bool
+	ret        chan struct{}
 	closing    bool
 	inputFiles []string
 
@@ -31,7 +31,7 @@ type Coordinator struct {
 	task        chan TaskReply
 	reduceTak   map[int][]TaskReply
 	pendingTask map[string]struct{}
-	mut         sync.Mutex
+	mut         sync.RWMutex
 }
 
 //
@@ -55,7 +55,8 @@ func (c *Coordinator) server() {
 // if the entire job has finished.
 //
 func (c *Coordinator) Done() bool {
-	return c.ret
+	<-c.ret
+	return true
 }
 
 func (c *Coordinator) dispatchMapTask() {
@@ -98,6 +99,9 @@ func (c *Coordinator) dispatchReduceTask() {
 }
 
 func (c *Coordinator) HeartBeat(args *Empty, reply *HealthReply) error {
+	c.mut.RLock()
+	defer c.mut.RUnlock()
+
 	if c.closing {
 		reply.Health = false
 	} else {
@@ -123,6 +127,9 @@ func (c *Coordinator) checkTimeout(task *TaskReply) {
 
 	c.pendingTask[fmt.Sprintf("%d-%s", task.TaskType, task.ID)] = struct{}{}
 	time.AfterFunc(10*time.Second, func() {
+		c.mut.RLock()
+		defer c.mut.RUnlock()
+
 		if _, ok := c.pendingTask[fmt.Sprintf("%d-%s", task.TaskType, task.ID)]; ok {
 			c.task <- *task
 		}
@@ -130,12 +137,13 @@ func (c *Coordinator) checkTimeout(task *TaskReply) {
 }
 
 func (c *Coordinator) ACK(task *ACKTask, reply *Empty) error {
+	c.mut.Lock()
+	defer c.mut.Unlock()
+
 	if _, ok := c.pendingTask[fmt.Sprintf("%d-%s", task.TaskType, task.ID)]; !ok {
 		return fmt.Errorf("wrong task id and type")
 	}
 
-	c.mut.Lock()
-	defer c.mut.Unlock()
 	delete(c.pendingTask, fmt.Sprintf("%d-%s", task.TaskType, task.ID))
 
 	if task.TaskType == Phase_Map {
@@ -156,9 +164,12 @@ func (c *Coordinator) ACK(task *ACKTask, reply *Empty) error {
 }
 
 func (c *Coordinator) end() {
+	c.mut.Lock()
+	defer c.mut.Unlock()
+
 	c.closing = true
 	time.Sleep(3 * time.Second) // wait for worker to shutdown
-	c.ret = true
+	c.ret <- struct{}{}
 }
 
 func (c *Coordinator) start() {
@@ -186,7 +197,7 @@ func (c *Coordinator) start() {
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := &Coordinator{
 		phase:       make(chan int, 1),
-		ret:         false,
+		ret:         make(chan struct{}),
 		closing:     false,
 		task:        make(chan TaskReply),
 		nMapper:     len(files),
@@ -196,7 +207,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		reduceCount: 0,
 		reduceTak:   make(map[int][]TaskReply),
 		pendingTask: make(map[string]struct{}),
-		mut:         sync.Mutex{},
+		mut:         sync.RWMutex{},
 	}
 
 	c.server()
