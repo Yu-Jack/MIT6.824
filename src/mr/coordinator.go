@@ -19,7 +19,7 @@ const (
 
 type Coordinator struct {
 	phase      chan int
-	ret        chan struct{}
+	wait       chan struct{}
 	closing    bool
 	inputFiles []string
 
@@ -55,7 +55,7 @@ func (c *Coordinator) server() {
 // if the entire job has finished.
 //
 func (c *Coordinator) Done() bool {
-	<-c.ret
+	<-c.wait
 	return true
 }
 
@@ -165,11 +165,11 @@ func (c *Coordinator) ACK(task *ACKTask, reply *Empty) error {
 
 func (c *Coordinator) end() {
 	c.mut.Lock()
-	defer c.mut.Unlock()
-
 	c.closing = true
+	c.mut.Unlock()
+
 	time.Sleep(3 * time.Second) // wait for worker to shutdown
-	c.ret <- struct{}{}
+	close(c.wait)
 }
 
 func (c *Coordinator) start() {
@@ -197,7 +197,7 @@ func (c *Coordinator) start() {
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := &Coordinator{
 		phase:       make(chan int, 1),
-		ret:         make(chan struct{}),
+		wait:        make(chan struct{}),
 		closing:     false,
 		task:        make(chan TaskReply),
 		nMapper:     len(files),
