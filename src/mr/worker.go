@@ -61,12 +61,21 @@ func Worker(mapf func(string, string) []KeyValue,
 				doReduceTask(task, reducef)
 			}
 
-			call("Coordinator.ACK", &ACKTask{ID: task.ID, TaskType: task.TaskType}, &Empty{})
+			ack(task)
 		case _, ok := <-heartBeatCh:
 			if !ok {
 				return
 			}
 		}
+	}
+}
+
+func ack(task TaskReply) {
+	var ok bool
+
+	for !ok {
+		// there might be a problem to keep acking, it should have limit.
+		ok = call("Coordinator.ACK", &ACKTask{ID: task.ID, TaskType: task.TaskType}, &Empty{})
 	}
 }
 
@@ -162,9 +171,7 @@ func fetchTask() <-chan TaskReply {
 
 		for {
 			t := TaskReply{}
-			if ok := call("Coordinator.FetchTask", &Empty{}, &t); !ok {
-				return
-			} else {
+			if ok := call("Coordinator.FetchTask", &Empty{}, &t); ok {
 				task <- t
 			}
 		}
@@ -217,6 +224,6 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 		return true
 	}
 
-	fmt.Println(err)
+	fmt.Println(fmt.Errorf("rpcname - %s: %w", rpcname, err))
 	return false
 }
