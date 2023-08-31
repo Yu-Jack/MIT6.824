@@ -14,7 +14,6 @@ import (
 const (
 	Task_Map = iota + 1
 	Task_Reduce
-	Task_Done
 )
 
 type HealthReply struct {

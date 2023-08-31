@@ -59,8 +59,6 @@ func Worker(mapf func(string, string) []KeyValue,
 				doMapTask(task, mapf)
 			case Phase_Reduce:
 				doReduceTask(task, reducef)
-			case Phase_Finished:
-				return
 			}
 
 			call("Coordinator.ACK", &ACKTask{ID: task.ID, TaskType: task.TaskType}, &Empty{})
