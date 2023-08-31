@@ -4,10 +4,10 @@
 
 This repository is for MIT 6.824 Labs.
 
-- [x] [Lab1](./docs/lab1.md)
+- [x] [Lab1](./docs/lab1)
 - [ ] Lab2
 - [ ] Lab3
-- [ ] Lab14
+- [ ] Lab4
 
 
 # References
