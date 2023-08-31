@@ -33,7 +33,6 @@ type Task struct {
 	Bucket    int
 }
 
-type TaskReply Task
 type Empty struct{}
 
 // Cook up a unique-ish UNIX-domain socket name

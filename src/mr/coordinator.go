@@ -28,8 +28,8 @@ type Coordinator struct {
 	nReduce     int
 	reduceCount int
 
-	task        chan TaskReply
-	reduceTak   map[int][]TaskReply
+	task        chan Task
+	reduceTak   map[int][]Task
 	pendingTask map[string]struct{}
 	mut         sync.RWMutex
 }
@@ -61,7 +61,7 @@ func (c *Coordinator) Done() bool {
 
 func (c *Coordinator) dispatchMapTask() {
 	for i := 0; i < len(c.inputFiles); i++ {
-		c.task <- TaskReply{
+		c.task <- Task{
 			TaskType:  Task_Map,
 			FileNames: []string{c.inputFiles[i]},
 			ID:        fmt.Sprintf("%d", i+1),
@@ -74,7 +74,7 @@ func (c *Coordinator) AddReduceTask(args *Task, reply *Empty) error {
 	c.mut.Lock()
 	defer c.mut.Unlock()
 
-	c.reduceTak[args.Bucket] = append(c.reduceTak[args.Bucket], TaskReply{
+	c.reduceTak[args.Bucket] = append(c.reduceTak[args.Bucket], Task{
 		FileNames: args.FileNames,
 	})
 
@@ -89,7 +89,7 @@ func (c *Coordinator) dispatchReduceTask() {
 			fileNames = append(fileNames, task.FileNames...)
 		}
 
-		c.task <- TaskReply{
+		c.task <- Task{
 			TaskType:  Task_Reduce,
 			FileNames: fileNames,
 			ID:        fmt.Sprintf("%d", i+1),
@@ -111,7 +111,7 @@ func (c *Coordinator) HeartBeat(args *Empty, reply *HealthReply) error {
 	return nil
 }
 
-func (c *Coordinator) FetchTask(args *Empty, reply *TaskReply) error {
+func (c *Coordinator) FetchTask(args *Empty, reply *Task) error {
 	task := <-c.task
 	reply.TaskType = task.TaskType
 	reply.FileNames = task.FileNames
@@ -121,7 +121,7 @@ func (c *Coordinator) FetchTask(args *Empty, reply *TaskReply) error {
 	return nil
 }
 
-func (c *Coordinator) checkTimeout(task *TaskReply) {
+func (c *Coordinator) checkTimeout(task *Task) {
 	c.mut.Lock()
 	defer c.mut.Unlock()
 
@@ -199,13 +199,13 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		phase:       make(chan int, 1),
 		wait:        make(chan struct{}),
 		closing:     false,
-		task:        make(chan TaskReply),
+		task:        make(chan Task),
 		nMapper:     len(files),
 		inputFiles:  files,
 		mapCount:    0,
 		nReduce:     nReduce,
 		reduceCount: 0,
-		reduceTak:   make(map[int][]TaskReply),
+		reduceTak:   make(map[int][]Task),
 		pendingTask: make(map[string]struct{}),
 		mut:         sync.RWMutex{},
 	}

@@ -70,7 +70,7 @@ func Worker(mapf func(string, string) []KeyValue,
 	}
 }
 
-func ack(task TaskReply) {
+func ack(task Task) {
 	var ok bool
 
 	for !ok {
@@ -79,7 +79,7 @@ func ack(task TaskReply) {
 	}
 }
 
-func doReduceTask(task TaskReply, reducef func(string, []string) string) {
+func doReduceTask(task Task, reducef func(string, []string) string) {
 	var intermediate []KeyValue
 	for _, filename := range task.FileNames {
 		content := getFileContent(filename)
@@ -110,7 +110,7 @@ func doReduceTask(task TaskReply, reducef func(string, []string) string) {
 	}
 }
 
-func doMapTask(task TaskReply, mapf func(string, string) []KeyValue) {
+func doMapTask(task Task, mapf func(string, string) []KeyValue) {
 	intermediate := []KeyValue{}
 
 	for _, filename := range task.FileNames {
@@ -163,14 +163,14 @@ func getFileContent(filename string) string {
 	return string(content)
 }
 
-func fetchTask() <-chan TaskReply {
-	task := make(chan TaskReply)
+func fetchTask() <-chan Task {
+	task := make(chan Task)
 
 	go func() {
 		defer close(task)
 
 		for {
-			t := TaskReply{}
+			t := Task{}
 			if ok := call("Coordinator.FetchTask", &Empty{}, &t); ok {
 				task <- t
 			}
@@ -192,13 +192,13 @@ func coordinatorHeartBeat() <-chan struct{} {
 
 			if ok := call("Coordinator.HeartBeat", &Empty{}, &hr); !ok {
 				return
-			} else {
-				if hr.Health {
-					heartbeat <- struct{}{}
-				} else {
-					return
-				}
 			}
+
+			if !hr.Health {
+				return
+			}
+
+			heartbeat <- struct{}{}
 		}
 	}()
 
