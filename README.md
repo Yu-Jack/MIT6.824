@@ -4,7 +4,9 @@
 
 This repository is for MIT 6.824 Labs.
 
-- [x] [Lab1](./docs/lab1)
+- [x] Lab1
+  - [Docs](./docs/lab1)
+  - [Codes](./src/mr)
 - [ ] Lab2
 - [ ] Lab3
 - [ ] Lab4
